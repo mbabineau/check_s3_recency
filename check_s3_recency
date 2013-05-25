@@ -1,0 +1,89 @@
+#!/usr/bin/env python
+
+from datetime import datetime, timedelta
+import optparse
+import sys
+
+import boto
+
+warn_age = 10
+crit_age = 60
+
+USAGE = """Checks the recency of an S3 file or folder.
+
+More specifically, this script checks the age of the most recently modified S3 key matching a specified prefix.  \
+This is useful for catching issues with scheduled jobs that generate S3 files such as backup or log upload scripts.
+
+Example:
+check_s3_recency -p s3://mybucket/backups/ -w 1440 -c 2880
+
+This retrieves all keys in the "mybucket" bucket that start with "backups/", finds the most recently modified result, \
+then compares that file's Last Modified property to the max warning and critical ages."""
+
+def exit_ok(msg):
+    print 'BUCKET OK: %s' % msg
+    sys.exit(0)
+
+def exit_warning(msg):
+    print 'BUCKET WARNING: %s' % msg
+    sys.exit(1)
+    
+def exit_critical(msg):
+    print 'BUCKET CRITICAL: %s' % msg
+    sys.exit(2)
+
+def main():
+    parser = optparse.OptionParser()
+    parser.add_option("-p", "--path", dest="path",
+                      help='Full or partial S3 file path (e.g., "s3://mybucket/mydir/myfile" or "s3://mybucket/mydir/")')
+    parser.add_option("-k", "--key-id", dest="key_id",
+                      help='AWS access key ID (default is the "AWS_ACCESS_KEY_ID" env var)')
+    parser.add_option("-s", "--secret-key", dest="secret_key",
+                      help='AWS secret access key (default is the "AWS_SECRET_ACCESS_KEY" env var)')
+    parser.add_option("-w", "--warning", dest="warning",
+                      help='Warning threshold, in minutes')
+    parser.add_option("-c", "--critical", dest="critical",
+                      help='Critical threshold, in minutes')
+    (options, args) = parser.parse_args()
+    
+    try:
+        parts = options.path.split('s3://')[1].split('/')
+        (bucket, path) = (parts[0], '/'.join(parts[1:]))
+    except:
+        print 'ERROR: Path (-p/--path) could not be parsed'
+        print
+        print USAGE
+        sys.exit(2)
+
+    if options.key_id and options.secret_key:
+        c = boto.connect_s3(options.key_id, options.secret_key)
+    else:
+        c = boto.connect_s3()    
+
+    try:
+        b = c.get_bucket(bucket)
+    except:
+        print 'ERROR: Could not connect to S3. Are your credentials (-k/--key-id and -s/--secret-key) correct?'
+        print
+        print USAGE
+        sys.exit(2)
+    
+    results = [(key.name, key.last_modified) for key in b.list(path)]
+    sorted_results = sorted(results, key=lambda key: key[1])
+    newest = sorted_results.pop()
+
+    newest_dt = datetime.strptime(newest[1], '%Y-%m-%dT%H:%M:%S.%fZ')
+    delta = datetime.utcnow() - newest_dt
+    age = (delta.days*86400 + delta.seconds) / 60  # in minutes
+    
+    msg = 's3://%s/%s is %s minutes old' % (bucket, newest[0], age)
+        
+    if options.critical and age > int(options.critical):
+        exit_critical(msg)
+    elif options.warning and age > int(options.warning):
+        exit_warning(msg)
+    else:
+        exit_ok(msg)
+    
+if __name__ == '__main__':
+    sys.exit(main())
